@@ -108,19 +108,23 @@ if (new File('.git').exists()) {
     // Exclude everything under the directory that git should be ignoring via .gitignore or that isn't checked in. These
     // restrict us only to files that are checked in or are staged.
     def repo = Grgit.open(project.file('.'))
-    excludes = new ArrayList<String>(repo.clean(ignore: false, directories: true, dryRun: true))
-    // And some of the files that we have checked in should also be excluded from this check
-    excludes.addAll([
-        '**/.git/**',
-        '**/build/**',
-        'CONTRIBUTING.md',
-        'gradlew',
-        'gradlew.bat',
-        '**/README.md',
-        '**/id_rsa',
-        '**/id_rsa.pub',
-        'checkstyle/suppressions.xml'
-    ])
+    List initialExcludes = null
+    try {
+      initialExcludes = repo.clean(ignore: false, directories: true, dryRun: true)
+      excludes = new ArrayList<String>(initialExcludes)
+      // And some of the files that we have checked in should also be excluded from this check
+      excludes.addAll([
+          '**/.git/**',
+          '**/build/**',
+          'CONTRIBUTING.md',
+          'gradlew',
+          'gradlew.bat',
+          '**/README.md',
+          '**/id_rsa',
+          '**/id_rsa.pub',
+          'checkstyle/suppressions.xml'
+      ])
+    } catch (org.eclipse.jgit.errors.NoWorkTreeException e) {}
   }
 }
 
