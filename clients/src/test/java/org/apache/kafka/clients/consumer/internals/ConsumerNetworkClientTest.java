@@ -22,6 +22,7 @@ import org.apache.kafka.clients.MockClient;
 import org.apache.kafka.clients.NetworkClient;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.HeartbeatRequest;
@@ -46,7 +47,7 @@ public class ConsumerNetworkClientTest {
     private MockClient client = new MockClient(time);
     private Cluster cluster = TestUtils.singletonCluster(topicName, 1);
     private Node node = cluster.nodes().get(0);
-    private Metadata metadata = new Metadata(0, Long.MAX_VALUE);
+    private Metadata metadata = new Metadata(0, Long.MAX_VALUE, true);
     private ConsumerNetworkClient consumerClient = new ConsumerNetworkClient(client, metadata, time, 100, 1000);
 
     @Test
@@ -78,6 +79,27 @@ public class ConsumerNetworkClientTest {
         consumerClient.awaitPendingRequests(node, Long.MAX_VALUE);
         assertTrue(future1.succeeded());
         assertTrue(future2.succeeded());
+    }
+
+    @Test
+    public void testDisconnectWithUnsentRequests() {
+        RequestFuture<ClientResponse> future = consumerClient.send(node, heartbeat());
+        assertTrue(consumerClient.hasPendingRequests(node));
+        assertFalse(client.hasInFlightRequests(node.idString()));
+        consumerClient.disconnect(node);
+        assertTrue(future.failed());
+        assertTrue(future.exception() instanceof DisconnectException);
+    }
+
+    @Test
+    public void testDisconnectWithInFlightRequests() {
+        RequestFuture<ClientResponse> future = consumerClient.send(node, heartbeat());
+        consumerClient.pollNoWakeup();
+        assertTrue(consumerClient.hasPendingRequests(node));
+        assertTrue(client.hasInFlightRequests(node.idString()));
+        consumerClient.disconnect(node);
+        assertTrue(future.failed());
+        assertTrue(future.exception() instanceof DisconnectException);
     }
 
     @Test

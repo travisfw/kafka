@@ -22,8 +22,8 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.network.NetworkReceive;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.types.Struct;
-import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.ProduceRequest;
@@ -49,7 +49,7 @@ public class NetworkClientTest {
     protected final int requestTimeoutMs = 1000;
     protected final MockTime time = new MockTime();
     protected final MockSelector selector = new MockSelector(time);
-    protected final Metadata metadata = new Metadata(0, Long.MAX_VALUE);
+    protected final Metadata metadata = new Metadata(0, Long.MAX_VALUE, true);
     protected final int nodeId = 1;
     protected final Cluster cluster = TestUtils.singletonCluster("test", nodeId);
     protected final Node node = cluster.nodes().get(0);
@@ -86,8 +86,7 @@ public class NetworkClientTest {
 
     @Test(expected = IllegalStateException.class)
     public void testSendToUnreadyNode() {
-        MetadataRequest.Builder builder =
-                new MetadataRequest.Builder(Arrays.asList("test"));
+        MetadataRequest.Builder builder = new MetadataRequest.Builder(Arrays.asList("test"), true);
         long now = time.milliseconds();
         ClientRequest request = client.newClientRequest("5", builder, now, false);
         client.send(request, now);
@@ -251,8 +250,7 @@ public class NetworkClientTest {
         // metadata request when the remote node disconnects with the request in-flight.
         awaitReady(client, node);
 
-        MetadataRequest.Builder builder =
-                new MetadataRequest.Builder(Collections.<String>emptyList());
+        MetadataRequest.Builder builder = new MetadataRequest.Builder(Collections.<String>emptyList(), true);
         long now = time.milliseconds();
         ClientRequest request = client.newClientRequest(node.idString(), builder, now, true);
         client.send(request, now);
@@ -266,7 +264,28 @@ public class NetworkClientTest {
         assertEquals(1, responses.size());
         assertTrue(responses.iterator().next().wasDisconnected());
     }
-    
+
+    @Test
+    public void testCallDisconnect() throws Exception {
+        awaitReady(client, node);
+        assertTrue("Expected NetworkClient to be ready to send to node " + node.idString(),
+            client.isReady(node, time.milliseconds()));
+        assertFalse("Did not expect connection to node " + node.idString() + " to be failed",
+            client.connectionFailed(node));
+        client.disconnect(node.idString());
+        assertFalse("Expected node " + node.idString() + " to be disconnected.",
+            client.isReady(node, time.milliseconds()));
+        assertTrue("Expected connection to node " + node.idString() + " to be failed after disconnect",
+            client.connectionFailed(node));
+        assertFalse(client.canConnect(node, time.milliseconds()));
+
+        // ensure disconnect does not reset blackout period if already disconnected
+        time.sleep(reconnectBackoffMsTest);
+        assertTrue(client.canConnect(node, time.milliseconds()));
+        client.disconnect(node.idString());
+        assertTrue(client.canConnect(node, time.milliseconds()));
+    }
+
     private static class TestCallbackHandler implements RequestCompletionHandler {
         public boolean executed = false;
         public ClientResponse response;

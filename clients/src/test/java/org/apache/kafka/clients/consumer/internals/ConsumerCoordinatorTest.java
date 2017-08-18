@@ -58,6 +58,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -119,7 +120,7 @@ public class ConsumerCoordinatorTest {
     public void setup() {
         this.time = new MockTime();
         this.subscriptions = new SubscriptionState(OffsetResetStrategy.EARLIEST);
-        this.metadata = new Metadata(0, Long.MAX_VALUE);
+        this.metadata = new Metadata(0, Long.MAX_VALUE, true);
         this.metadata.update(cluster, Collections.<String>emptySet(), time.milliseconds());
         this.client = new MockClient(time, metadata);
         this.consumerClient = new ConsumerNetworkClient(client, metadata, time, 100, 1000);
@@ -621,7 +622,7 @@ public class ConsumerCoordinatorTest {
 
         // join initially, but let coordinator rebalance on sync
         client.prepareResponse(joinGroupFollowerResponse(1, consumerId, "leader", Errors.NONE));
-        client.prepareResponse(syncGroupResponse(Collections.<TopicPartition>emptyList(), Errors.UNKNOWN));
+        client.prepareResponse(syncGroupResponse(Collections.<TopicPartition>emptyList(), Errors.UNKNOWN_SERVER_ERROR));
         coordinator.joinGroupIfNeeded();
     }
 
@@ -951,6 +952,37 @@ public class ConsumerCoordinatorTest {
     }
 
     @Test
+    public void testCoordinatorDisconnectAfterNotCoordinatorError() {
+        testInFlightRequestsFailedAfterCoordinatorMarkedDead(Errors.NOT_COORDINATOR);
+    }
+
+    @Test
+    public void testCoordinatorDisconnectAfterCoordinatorNotAvailableError() {
+        testInFlightRequestsFailedAfterCoordinatorMarkedDead(Errors.COORDINATOR_NOT_AVAILABLE);
+    }
+
+    private void testInFlightRequestsFailedAfterCoordinatorMarkedDead(Errors error) {
+        client.prepareResponse(groupCoordinatorResponse(node, Errors.NONE));
+        coordinator.ensureCoordinatorReady();
+
+        // Send two async commits and fail the first one with an error.
+        // This should cause a coordinator disconnect which will cancel the second request.
+
+        MockCommitCallback firstCommitCallback = new MockCommitCallback();
+        MockCommitCallback secondCommitCallback = new MockCommitCallback();
+        coordinator.commitOffsetsAsync(Collections.singletonMap(t1p, new OffsetAndMetadata(100L)), firstCommitCallback);
+        coordinator.commitOffsetsAsync(Collections.singletonMap(t1p, new OffsetAndMetadata(100L)), secondCommitCallback);
+
+        client.respond(offsetCommitResponse(Collections.singletonMap(t1p, error)));
+        consumerClient.pollNoWakeup();
+        coordinator.invokeCompletedOffsetCommitCallbacks();
+
+        assertTrue(coordinator.coordinatorUnknown());
+        assertTrue(firstCommitCallback.exception instanceof RetriableCommitFailedException);
+        assertTrue(secondCommitCallback.exception instanceof RetriableCommitFailedException);
+    }
+
+    @Test
     public void testAutoCommitDynamicAssignment() {
         final String consumerId = "consumer";
 
@@ -1212,6 +1244,42 @@ public class ConsumerCoordinatorTest {
         coordinator.commitOffsetsSync(Collections.singletonMap(t1p, new OffsetAndMetadata(100L)), Long.MAX_VALUE);
     }
 
+    @Test
+    public void testAsyncCommitCallbacksInvokedPriorToSyncCommitCompletion() throws Exception {
+        client.prepareResponse(groupCoordinatorResponse(node, Errors.NONE));
+        coordinator.ensureCoordinatorReady();
+
+        final List<OffsetAndMetadata> committedOffsets = Collections.synchronizedList(new ArrayList<OffsetAndMetadata>());
+        final OffsetAndMetadata firstOffset = new OffsetAndMetadata(0L);
+        final OffsetAndMetadata secondOffset = new OffsetAndMetadata(1L);
+
+        coordinator.commitOffsetsAsync(Collections.singletonMap(t1p, firstOffset), new OffsetCommitCallback() {
+            @Override
+            public void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets, Exception exception) {
+                committedOffsets.add(firstOffset);
+            }
+        });
+
+        // Do a synchronous commit in the background so that we can send both responses at the same time
+        Thread thread = new Thread() {
+            @Override
+            public void run() {
+                coordinator.commitOffsetsSync(Collections.singletonMap(t1p, secondOffset), 10000);
+                committedOffsets.add(secondOffset);
+            }
+        };
+
+        thread.start();
+
+        client.waitForRequests(2, 5000);
+        client.respond(offsetCommitResponse(Collections.singletonMap(t1p, Errors.NONE)));
+        client.respond(offsetCommitResponse(Collections.singletonMap(t1p, Errors.NONE)));
+
+        thread.join();
+
+        assertEquals(Arrays.asList(firstOffset, secondOffset), committedOffsets);
+    }
+
     @Test(expected = KafkaException.class)
     public void testCommitUnknownTopicOrPartition() {
         client.prepareResponse(groupCoordinatorResponse(node, Errors.NONE));
@@ -1267,7 +1335,7 @@ public class ConsumerCoordinatorTest {
         coordinator.ensureCoordinatorReady();
 
         // sync commit with invalid partitions should throw if we have no callback
-        client.prepareResponse(offsetCommitResponse(Collections.singletonMap(t1p, Errors.UNKNOWN)), false);
+        client.prepareResponse(offsetCommitResponse(Collections.singletonMap(t1p, Errors.UNKNOWN_SERVER_ERROR)), false);
         coordinator.commitOffsetsSync(Collections.singletonMap(t1p, new OffsetAndMetadata(100L)), Long.MAX_VALUE);
     }
 
@@ -1285,6 +1353,13 @@ public class ConsumerCoordinatorTest {
         coordinator.invokeCompletedOffsetCommitCallbacks();
         assertEquals(invokedBeforeTest + 1, mockOffsetCommitCallback.invoked);
         assertTrue(mockOffsetCommitCallback.exception instanceof IllegalArgumentException);
+    }
+
+    @Test
+    public void testCommitOffsetSyncWithoutFutureGetsCompleted() {
+        client.prepareResponse(groupCoordinatorResponse(node, Errors.NONE));
+        coordinator.ensureCoordinatorReady();
+        assertFalse(coordinator.commitOffsetsSync(Collections.singletonMap(t1p, new OffsetAndMetadata(100L)), 0));
     }
 
     @Test

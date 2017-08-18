@@ -604,13 +604,18 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             RequestFuture<Void> future = sendOffsetCommitRequest(offsets);
             client.poll(future, remainingMs);
 
+            // We may have had in-flight offset commits when the synchronous commit began. If so, ensure that
+            // the corresponding callbacks are invoked prior to returning in order to preserve the order that
+            // the offset commits were applied.
+            invokeCompletedOffsetCommitCallbacks();
+
             if (future.succeeded()) {
                 if (interceptors != null)
                     interceptors.onCommit(offsets);
                 return true;
             }
 
-            if (!future.isRetriable())
+            if (future.failed() && !future.isRetriable())
                 throw future.exception();
 
             time.sleep(retryBackoffMs);
